@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Application + Pilot Map</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+
+    <style>
+        #map { height: 100vh; }
+
+        #controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 9999;
+            background: white;
+            padding: 10px;
+            border-radius: 6px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+            font-family: Arial;
+        }
+
+        .btn {
+            margin: 3px;
+            padding: 5px 12px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            background: #007bff;
+            color: white;
+        }
+        .btn.off {
+            background: #ccc;
+            color: black;
+        }
+
+        /* Pilot verification buttons */
+        #pilotFilters {
+            margin-top: 8px;
+            display: none; /* Show only in pilot mode */
+        }
+    </style>
+</head>
+<body>
+
+<div id="controls">
+    <button id="appBtn" class="btn">Application Flow</button>
+    <button id="pilotBtn" class="btn off">Pilot Flow</button>
+
+    <div id="pilotFilters">
+        <button id="showAll" class="btn">Show All</button>
+        <button id="showVerified" class="btn off">Verified</button>
+        <button id="showFailed" class="btn off">Failed</button>
+    </div>
+</div>
+
+<div id="legend" style="
+    position: absolute;
+    bottom: 20px;
+    left: 10px;
+    background: white;
+    padding: 10px 12px;
+    border-radius: 6px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.25);
+    font-family: Arial;
+    font-size: 14px;
+    z-index: 9999;
+">
+    <div style="display:flex;align-items:center;margin-bottom:6px;">
+        <i class="fa-solid fa-map-pin" style="color:#777; font-size:18px; margin-right:6px;"></i>
+        Meeting Location
+    </div>
+
+    <div style="display:flex;align-items:center;">
+        <div style="
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #777;
+            margin-right: 6px;
+        "></div>
+        Customer FI Location
+    </div>
+</div>
+
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+<script>
+
+// -------------------------------------------------------------
+// Helper Functions
+// -------------------------------------------------------------
+function safe(val) {
+    if (!val || val === "null" || val === "NaN" || Number.isNaN(val)) return "N/A";
+    return val;
+}
+
+function lanCircle(color) {
+    return L.divIcon({
+        className: "",
+        html: `
+            <div style="
+                width: 10px;
+                height: 10px;
+                background: white;
+                border-radius: 50%;
+                border: 4px solid ${color};
+            "></div>
+        `,
+        iconSize: [10, 10],
+        iconAnchor: [5, 5]
+    });
+}
+
+function meetingPin(color) {
+    return L.divIcon({
+        className: "",
+        html: `
+            <i class="fa-solid fa-map-pin" 
+               style="
+                   font-size: 28px;
+                   color: ${color};
+                   text-shadow: 0 0 5px white;
+               ">
+            </i>
+        `,
+        iconSize: [15, 15],
+        iconAnchor: [14, 28]   // bottom tip is anchor point
+    });
+}
+
+
+// Global IAM → Color mapping
+const iamColorMap = {};
+let iamColorIndex = 0;
+
+// Your 5-color palette
+const iamColors = [
+    "#D71E48", // Red
+    "#1f77b4", // Dark Blue
+    "#2ca02c", // Dark Green
+    "#7E1ED7", // Purple
+    "#ff7f0e"  // Orange
+];
+
+// Assign color based on IAM_ID order of appearance
+function iamColor(iam_id) {
+    if (!iam_id) return iamColors[0];  // fallback
+
+    const key = String(iam_id).trim(); // ensure consistent key
+
+    // If IAM not assigned yet → assign next color
+    if (!iamColorMap[key]) {
+        iamColorMap[key] = iamColors[iamColorIndex % iamColors.length];
+        iamColorIndex++;
+    }
+
+    return iamColorMap[key];
+}
+
+// -------------------------------------------------------------
+// MAP INIT
+// -------------------------------------------------------------
+const map = L.map('map').setView([22.0, 78.0], 5);
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(map);
+
+const appLayer = L.layerGroup().addTo(map);
+const pilotLayer = L.layerGroup();
+const pilotLinesLayer = L.layerGroup();
+
+let pilotDataGlobal = [];   // store the pilot data for filtering
+
+
+// -------------------------------------------------------------
+// APPLICATION FLOW
+// -------------------------------------------------------------
+function loadApplicationFlow() {
+    appLayer.clearLayers();
+
+    fetch("/markers")
+        .then(r => r.json())
+        .then(data => {
+            data.forEach(row => {
+                if (!row.latitude || !row.longitude) return;
+                if (safe(row.lan) === "N/A") return;
+
+                const marker = L.marker([row.latitude, row.longitude], {
+                    icon: lanCircle(row.is_active ? "green" : "red")
+                });
+
+                marker.bindPopup(`
+                    <b>Application No:</b> ${safe(row.application_number)}<br>
+                    <b>LAN:</b> ${safe(row.lan)}<br>
+                    <b>Name:</b> ${safe(row.customer_name)}<br>
+                    <b>IAM:</b> ${safe(row.executive_iam_id)}<br>
+                `);
+
+                appLayer.addLayer(marker);
+            });
+        });
+}
+
+
+// -------------------------------------------------------------
+// PILOT FLOW (with FILTERS)
+// -------------------------------------------------------------
+function renderPilotFlow(filteredData) {
+
+    pilotLayer.clearLayers();
+    pilotLinesLayer.clearLayers();
+
+    filteredData.forEach(row => {
+
+        const meetingLat = row.meeting_latitude;
+        const meetingLon = row.meeting_longitude;
+
+        const lanLat = row.Lat;
+        const lanLon = row.Lon;
+
+        if (!meetingLat || !meetingLon) return;
+        if (!lanLat || !lanLon) return;
+
+        const color = iamColor(row.iam_id);
+
+        const mMarker = L.marker([meetingLat, meetingLon], {
+            icon: meetingPin(color)
+        }).bindPopup(`
+            <b>IAM:</b> ${safe(row.iam_id)}<br>
+            <b>Name:</b> ${safe(row.name)}<br>
+            <b>Meeting ID:</b> ${safe(row.meeting_id)}<br>
+            <b>Status:</b> ${safe(row.meeting_status)}<br>
+            <b>Attempt:</b> ${safe(row.location_attempts)}<br>
+            <b>Verification:</b> ${safe(row.location_verification_status)}<br>
+        `);
+
+        const lMarker = L.marker([lanLat, lanLon], {
+            icon: lanCircle(color)
+        }).bindPopup(`
+            <b>LAN:</b> ${safe(row.lan)}<br>
+            <b>IAM:</b> ${safe(row.iam_id)}<br>
+            <b>Meeting ID:</b> ${safe(row.meeting_id)}<br>
+            <b>Verification:</b> ${safe(row.location_verification_status)}<br>
+        `);
+
+        const line = L.polyline(
+            [[meetingLat, meetingLon], [lanLat, lanLon]],
+            { color: color, weight: 2 }
+        );
+
+        pilotLayer.addLayer(mMarker);
+        pilotLayer.addLayer(lMarker);
+        pilotLinesLayer.addLayer(line);
+    });
+}
+
+function loadPilotFlow() {
+    fetch("/pilot_markers")
+        .then(r => r.json())
+        .then(data => {
+            pilotDataGlobal = data;     // store for filtering
+            renderPilotFlow(pilotDataGlobal);
+        });
+}
+
+
+// -------------------------------------------------------------
+// FILTER BUTTON HANDLERS
+// -------------------------------------------------------------
+document.getElementById("showAll").onclick = () => {
+    renderPilotFlow(pilotDataGlobal);
+    setFilterButtons("showAll");
+};
+
+document.getElementById("showVerified").onclick = () => {
+    const filtered = pilotDataGlobal.filter(r =>
+        r.location_verification_status === "VERIFIED"
+    );
+    renderPilotFlow(filtered);
+    setFilterButtons("showVerified");
+};
+
+document.getElementById("showFailed").onclick = () => {
+    const filtered = pilotDataGlobal.filter(r =>
+        r.location_verification_status === "FAILED"
+    );
+    renderPilotFlow(filtered);
+    setFilterButtons("showFailed");
+};
+
+function setFilterButtons(active) {
+    document.getElementById("showAll").classList.add("off");
+    document.getElementById("showVerified").classList.add("off");
+    document.getElementById("showFailed").classList.add("off");
+
+    document.getElementById(active).classList.remove("off");
+}
+
+
+// -------------------------------------------------------------
+// FLOW TOGGLE
+// -------------------------------------------------------------
+document.getElementById("appBtn").onclick = () => {
+    appLayer.addTo(map);
+    pilotLayer.remove();
+    pilotLinesLayer.remove();
+
+    pilotFilters.style.display = "none";
+
+    appBtn.classList.remove("off");
+    pilotBtn.classList.add("off");
+};
+
+document.getElementById("pilotBtn").onclick = () => {
+    pilotLayer.addTo(map);
+    pilotLinesLayer.addTo(map);
+    appLayer.remove();
+
+    pilotFilters.style.display = "block";
+
+    pilotBtn.classList.remove("off");
+    appBtn.classList.add("off");
+};
+
+
+// -------------------------------------------------------------
+// INITIAL LOAD
+// -------------------------------------------------------------
+loadApplicationFlow();
+loadPilotFlow();
+
+</script>
+
+</body>
+</html>
